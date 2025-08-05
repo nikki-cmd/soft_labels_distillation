@@ -7,33 +7,20 @@ import sys
 import configs.config as cfg
 from tools.dataloader import Dataloader
 import tools.metrics as metrics
+import torch.nn.functional as F
 
-def softmax(x, temperature):
+def softmax(x, temperature=1.0):
     x = np.array(x, dtype=np.float64)
     x_scaled = x / temperature
     e_x = np.exp(x_scaled - np.max(x_scaled))
     return e_x / e_x.sum()
 
-
-def top_p_get_logits(logits, p=0.9, temperature=1.0):
-        logits = np.array(logits, dtype=np.float64)
-        probs = softmax(logits, temperature)
-        
-        sorted_indices = np.argsort(probs)[::-1]
-        sorted_probs = probs[sorted_indices]
-        cumulative_probs = np.cumsum(sorted_probs)
-        
-        cutoff = int(np.sum(cumulative_probs < p)) + 1
-        top_p_indices = sorted_indices[:cutoff]
-        
-        top_p_logits = logits[top_p_indices]
-
-        top_p_probs = probs[top_p_indices]
-        top_p_probs = softmax(logits[top_p_indices])
-        
-        selected_index = np.random.choice(top_p_indices, p=top_p_probs)
-        
-        return selected_index, top_p_indices, top_p_logits
+def kl_divergence(student_probs, teacher_probs):
+    eps = 1e-8
+    student_probs = np.clip(student_probs, eps, 1.0 - eps)
+    teacher_probs = np.clip(teacher_probs, eps, 1.0 - eps)
+    
+    return np.sum(teacher_probs * np.log(teacher_probs / student_probs))
 
 tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer)
 tokenizer.pad_token = tokenizer.eos_token
@@ -63,7 +50,7 @@ for n in range(1, 11):
         return_tensors="pt",
         add_special_tokens=True
     ).to(device)
-
+    
     input_ids = inputs['input_ids']
     attention_mask = inputs['attention_mask']
     
@@ -76,7 +63,6 @@ for n in range(1, 11):
     kl_divergences = []
     
     current_input_ids = input_ids.clone()
-    
     max_new_tokens = min(10, len(teacher_logits_list))
     
     for step in range(max_new_tokens):
@@ -87,34 +73,40 @@ for n in range(1, 11):
                 else attention_mask[:, :current_input_ids.shape[1]]
             )
             student_logits = outputs.logits[0, -1, :]
-
+        
         student_logits_np = student_logits.float().cpu().numpy()
         
         if step < len(teacher_logits_list):
-            teacher_logits_np = np.array(teacher_logits_list[step], dtype=np.float64)
+            teacher_data = teacher_logits_list[step]
             
-            temperature = 4.0
-            student_probs = softmax(student_logits_np, temperature)
+            if isinstance(teacher_data, (list, tuple)) and len(teacher_data) == 2:
+                top_p_indices = np.array(teacher_data[0], dtype=int)
+                teacher_logits_np = np.array(teacher_data[1], dtype=np.float64)  
+            else:
+                top_p_indices = np.arange(len(teacher_data))
+                teacher_logits_np = np.array(teacher_data, dtype=np.float64)
+            
+            student_logits_for_comparison = student_logits_np[top_p_indices]
+            
+            temperature = 1.0
+            student_probs = softmax(student_logits_for_comparison, temperature)
             teacher_probs = softmax(teacher_logits_np, temperature)
-            vocab_size = max(len(student_probs), len(teacher_probs))
             
-            if len(student_probs) < vocab_size:
-                student_probs = np.pad(student_probs, (0, vocab_size - len(student_probs)))
-            if len(teacher_probs) < vocab_size:
-                teacher_probs = np.pad(teacher_probs, (0, vocab_size - len(teacher_probs)))
-                
-                student_probs = student_probs[:vocab_size]
-                teacher_probs = teacher_probs[:vocab_size]
-                
-                kl_div = metrics.kl_divergence(student_probs, teacher_probs)
-                kl_divergences.append(kl_div)
-                total_kl_div += kl_div
-                
-                print(f"Step {step}: KL-div = {kl_div:.4f}")
+            student_probs = student_probs / np.sum(student_probs)
+            teacher_probs = teacher_probs / np.sum(teacher_probs)
+            
+            print(len(student_probs), len(teacher_probs))
+            print(student_probs, teacher_probs)
+            kl_div = kl_divergence(student_probs, teacher_probs)
+            kl_divergences.append(kl_div)
+            total_kl_div += kl_div
+            
+            print(f"Step {step}: KL-div = {kl_div:.4f} (comparing {len(top_p_indices)} tokens)")
 
-                next_token_id = np.random.choice(len(student_probs), p=student_probs/np.sum(student_probs))
-                next_token_tensor = torch.tensor([[next_token_id]]).to(device)
-                current_input_ids = torch.cat([current_input_ids, next_token_tensor], dim=1)
+            next_token_id = np.random.choice(top_p_indices, p=teacher_probs) 
+            next_token_tensor = torch.tensor([[next_token_id]]).to(device)
+            current_input_ids = torch.cat([current_input_ids, next_token_tensor], dim=1)
+            
         else:
             print(f"No teacher distribution for step {step}")
             break
