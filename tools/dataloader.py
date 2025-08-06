@@ -10,11 +10,13 @@ class Dataloader():
     def get_softlabels(self):
         data = np.load(self.softlabels_path, allow_pickle=True)
         logits_arrays = data["logits"]
+        indeces_arrays = data["indeces"]
         
-        return logits_arrays
+        return logits_arrays, indeces_arrays
     
     def get_hardlabels(self):
         data = pd.read_csv(self.hardlabels_path)
+        data = data.reset_index(drop=True)
         return data["model_attempt"].iloc[self.question_number]
     
     def get_question(self):
