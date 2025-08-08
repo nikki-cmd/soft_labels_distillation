@@ -1,20 +1,14 @@
 import torch
-import torch.nn.functional as F
 
-def kl_divergence(student_logits, teacher_logits):
-    student_logits = torch.tensor(student_logits, dtype=torch.float32)
-    teacher_logits = torch.tensor(teacher_logits, dtype=torch.float32)
+import numpy as np
+
+def kl_divergence(student_probs, teacher_probs):
+    p = student_probs
+    q = teacher_probs
     
-    student_probs = F.softmax(student_logits, dim=-1)
-    teacher_probs = F.softmax(teacher_logits, dim=-1)
+    kl = np.sum(p * np.log(p / q))
+    
+    return kl
 
-    eps = 1e-8
-    student_probs = torch.clamp(student_probs, eps, 1.0 - eps)
-    teacher_probs = torch.clamp(teacher_probs, eps, 1.0 - eps)
-
-    student_probs = student_probs / student_probs.sum(dim=-1, keepdim=True)
-    teacher_probs = teacher_probs / teacher_probs.sum(dim=-1, keepdim=True)
-
-    # Вычисляем KL-дивергенцию
-    kl_div = (teacher_probs * torch.log(teacher_probs / student_probs)).sum(dim=-1)
-    return kl_div
+def cross_entropy(p_student):
+    return -torch.log(p_student) 

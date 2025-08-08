@@ -1,34 +1,26 @@
 import torch 
-import torch.nn as nn
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from datasets import load_dataset
-import sys
+from transformers import AutoTokenizer
 import configs.config as cfg
 from tools.dataloader import Dataloader
 import tools.metrics as metrics
+import torch.nn.functional as F
 
-def softmax(x, temperature=0.8):
-    x = np.array(x, dtype=np.float64)
-    x_scaled = x / temperature
-    e_x = np.exp(x_scaled - np.max(x_scaled))
-    return e_x / e_x.sum()
+def softmax(x):
+    x_shifted = x - np.max(x)
+    exp_x = np.exp(x_shifted)
+    return exp_x / np.sum(exp_x)
 
 tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer)
 tokenizer.pad_token = tokenizer.eos_token
 
-student = AutoModelForCausalLM.from_pretrained(
-    cfg.student_model,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-    trust_remote_code=True
-)
+student = cfg.student
 
 optimizer = torch.optim.AdamW(student.parameters(), lr=cfg.lr)
 student.train()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-for n in range(1, 7):
+for n in range(0, 1):
     print(f"PROCESSING QUESTION #{n}")
     question_distriputions_path = cfg.softlabels_path + str(n) + ".npz"
     train_loader = Dataloader(question_distriputions_path, cfg.hardlabels_path, n)
@@ -36,6 +28,7 @@ for n in range(1, 7):
     teachers_hardlabels = train_loader.get_hardlabels()
     teachers_softlabels, teachers_indeces = train_loader.get_softlabels()
     question = train_loader.get_question()
+    teachers_hardlabels_tokenized = train_loader.get_tokenized_hardlabels()
     
     inputs = tokenizer(
         question,
@@ -67,21 +60,26 @@ for n in range(1, 7):
             )
             student_logits = outputs.logits[0, -1, :]
         
+        #cross-entropy
+        p_student = F.softmax(student_logits, dim=-1)[teachers_hardlabels_tokenized[step]] 
+        ce_loss = metrics.cross_entropy(-torch.log(p_student))
+        
+        #KL-div
         filtered_student_logits = []
-        
         for tidx in range(0, len(teachers_indeces[step])):
-            filtered_student_logits.append(student_logits[tidx])
+            filtered_student_logits.append(student_logits[tidx].item())
         
-        print(len(filtered_student_logits), len(teachers_softlabels[step]))
+        '''
+        print(softmax(np.array(teachers_softlabels[step])),'|', teachers_softlabels[step])
+        print(softmax(np.array(filtered_student_logits)), '|', filtered_student_logits)
+        '''
         
-        print(f"Loss:{metrics.kl_divergence(filtered_student_logits, teachers_softlabels[step])}")
+        student_probs = softmax(np.array(filtered_student_logits))
+        teacher_probs = softmax(np.array(teachers_softlabels[step]))
         
-        progress = (step + 1) / max_new_tokens
-        filled = int(round(20 * progress))
-        bar = '=' * filled + '-' * (20 - filled)
-        percent = int(round(100 * progress))
-        sys.stdout.write(f"\r[{bar}] {percent}% ({step+1}/{max_new_tokens} tokens)")
-        sys.stdout.flush()
+        kl_loss = metrics.kl_divergence(student_probs, teacher_probs)
+        
+        print(f"Step{step}: KL_loss={kl_loss}, CE_loss={ce_loss}, total_loss={0.5*kl_loss + 0.5 * ce_loss}")
     
     print(f"\nAverage KL-divergence: {total_kl_div / len(kl_divergences):.4f}")
     print(f"All KL-divergences: {[f'{kl:.4f}' for kl in kl_divergences]}")

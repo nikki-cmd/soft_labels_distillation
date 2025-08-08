@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import ast
 
 class Dataloader():
     def __init__(self, softlabels_path, hardlabels_path, question_number):
@@ -22,4 +23,8 @@ class Dataloader():
     def get_question(self):
         data = pd.read_csv(self.hardlabels_path)
         return data["questions"].iloc[self.question_number]
+    
+    def get_tokenized_hardlabels(self):
+        data = pd.read_csv(self.hardlabels_path)
+        return ast.literal_eval(data["tokenized_model_attempt"].iloc[self.question_number])
     
